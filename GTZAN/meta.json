@@ -1,0 +1,24 @@
+{
+    "source_root": "/home/mmlab206/61347023S/GTZAN/genres",
+    "out_root": "/home/mmlab206/61347023S/GTZAN/GTZAN_SPLIT",
+    "seed": 42,
+    "val_ratio": 0.1,
+    "test_ratio": 0.1,
+    "labels": [
+      "blues",
+      "classical",
+      "country",
+      "disco",
+      "hiphop",
+      "jazz",
+      "metal",
+      "pop",
+      "reggae",
+      "rock"
+    ],
+    "counts": {
+      "all": 900,
+      "train": 800,
+      "test": 100
+    }
+  }

@@ -1,0 +1,8 @@
+torch
+numpy
+pandas
+librosa
+soundfile
+scipy
+numba
+audioread
