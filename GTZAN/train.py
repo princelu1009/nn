@@ -30,7 +30,6 @@ import os
 import json
 import math
 import argparse
-import copy
 from dataclasses import asdict, dataclass
 from typing import Dict, List, Tuple
 
@@ -47,14 +46,6 @@ from torch.utils.data import Dataset, DataLoader
 # ============================================================
 # 1) Model definition
 # ============================================================
-def infer_input_dim(n_mfcc: int) -> int:
-    """
-    Input dim after feature stacking:
-      MFCC + delta + delta2 + centroid + RMS + chroma + contrast
-    """
-    return (n_mfcc * 3) + 1 + 1 + 12 + 7
-
-
 class LSTMClassifier(nn.Module):
     """
     A simple sequence classifier:
@@ -64,18 +55,8 @@ class LSTMClassifier(nn.Module):
 
     This is a common baseline for time-series classification.
     """
-    def __init__(
-        self,
-        input_dim: int,
-        hidden_dim: int,
-        output_dim: int,
-        num_layers: int,
-        dropout: float = 0.0,
-        bidirectional: bool = True,
-    ):
+    def __init__(self, input_dim: int, hidden_dim: int, output_dim: int, num_layers: int, dropout: float = 0.0):
         super().__init__()
-        self.bidirectional = bidirectional
-        lstm_out_dim = hidden_dim * (2 if bidirectional else 1)
 
         # nn.LSTM:
         # input_dim  = feature dimension per timestep (33 by default)
@@ -87,25 +68,11 @@ class LSTMClassifier(nn.Module):
             input_dim,
             hidden_dim,
             num_layers,
-            dropout=(dropout if num_layers > 1 else 0.0),
-            bidirectional=bidirectional,
+            dropout=(dropout if num_layers > 1 else 0.0)
         )
 
-        # self.rnn=nn.RNN(
-        #     input_dim,
-        #     hidden_dim,
-        #     num_layers,
-        #     dropout=(dropout if num_layers > 1 else 0.0),
-        #     bidirectional=bidirectional,
-        # )
-    
-
-
-
-        # Pool sequence outputs instead of using only the last step.
-        self.norm = nn.LayerNorm(lstm_out_dim * 2)
-        self.dropout = nn.Dropout(dropout)
-        self.linear = nn.Linear(lstm_out_dim * 2, output_dim)
+        # A linear "classifier head" that maps LSTM hidden state -> class logits
+        self.linear = nn.Linear(hidden_dim, output_dim)
 
     def forward(self, x, hidden=None):
         """
@@ -119,14 +86,11 @@ class LSTMClassifier(nn.Module):
           logits: (batch, output_dim)  (unnormalized scores for each class)
           hidden: final hidden state tuple (h_n, c_n)
         """
-        # out, hidden = self.lstm(x, hidden)
-        out, hidden = self.rnn(x, hidden)
+        out, hidden = self.lstm(x, hidden)
 
-        mean_pool = out.mean(dim=0)
-        max_pool = out.max(dim=0).values
-        pooled = torch.cat([mean_pool, max_pool], dim=1)
-        pooled = self.dropout(self.norm(pooled))
-        logits = self.linear(pooled)
+        # out: (seq_len, batch, hidden_dim)
+        # out[-1]: (batch, hidden_dim)  <- last timestep
+        logits = self.linear(out[-1])
         return logits, hidden
 
     @staticmethod
@@ -181,18 +145,13 @@ def extract_audio_features(
     y, sr = librosa.load(file_path, sr=target_sr)
 
     # Feature extraction per frame (hop_length controls frame step size)
-    mfcc = librosa.feature.mfcc(y=y, sr=sr, hop_length=hop_length, n_mfcc=n_mfcc)
-    mfcc_delta = librosa.feature.delta(mfcc)
-    mfcc_delta2 = librosa.feature.delta(mfcc, order=2)
-    centroid = librosa.feature.spectral_centroid(y=y, sr=sr, hop_length=hop_length)
-    rms = librosa.feature.rms(y=y, hop_length=hop_length)
-    chroma = librosa.feature.chroma_stft(y=y, sr=sr, hop_length=hop_length)
-    contrast = librosa.feature.spectral_contrast(y=y, sr=sr, hop_length=hop_length)
+    mfcc = librosa.feature.mfcc(y=y, sr=sr, hop_length=hop_length, n_mfcc=n_mfcc)          # (13, T)
+    centroid = librosa.feature.spectral_centroid(y=y, sr=sr, hop_length=hop_length)         # (1,  T)
+    chroma = librosa.feature.chroma_stft(y=y, sr=sr, hop_length=hop_length)                 # (12, T)
+    contrast = librosa.feature.spectral_contrast(y=y, sr=sr, hop_length=hop_length)         # (7,  T)
 
-    feats = np.concatenate(
-        [mfcc, mfcc_delta, mfcc_delta2, centroid, rms, chroma, contrast],
-        axis=0,
-    ).astype(np.float32)
+    # Concatenate along feature dimension -> (33, T)
+    feats = np.concatenate([mfcc, centroid, chroma, contrast], axis=0).astype(np.float32)
 
     # Force fixed time length to timeseries_length (default 128)
     T = feats.shape[1]
@@ -204,12 +163,7 @@ def extract_audio_features(
         # truncate time axis
         feats = feats[:, :timeseries_length]
 
-    # Normalize each feature channel across time to stabilize optimization.
-    feat_mean = feats.mean(axis=1, keepdims=True)
-    feat_std = feats.std(axis=1, keepdims=True)
-    feats = (feats - feat_mean) / np.clip(feat_std, a_min=1e-6, a_max=None)
-
-    # Convert (F, 128) -> (128, F) so each row is a timestep feature vector
+    # Convert (33, 128) -> (128, 33) so each row is a timestep feature vector
     return feats.T
 
 
@@ -300,7 +254,7 @@ class AudioCSVDataset(Dataset):
 
             # If missing file and not failing, return zero features.
             # This keeps training running but might hurt accuracy if many are missing.
-            feats = np.zeros((self.timeseries_length, infer_input_dim(self.n_mfcc)), dtype=np.float32)
+            feats = np.zeros((self.timeseries_length, 33), dtype=np.float32)
         else:
             # Use cached features if enabled and already computed
             if self.cache_features and idx in self._cache:
@@ -316,7 +270,7 @@ class AudioCSVDataset(Dataset):
                 if self.cache_features:
                     self._cache[idx] = feats
 
-        # x: torch tensor of shape (seq_len, input_dim)
+        # x: torch tensor of shape (128, 33)
         x = torch.from_numpy(feats)
 
         # If label2idx is None, we are in inference/test mode.
@@ -398,9 +352,6 @@ class HParams:
     target_sr: int | None
     num_workers: int
     seed: int
-    bidirectional: bool
-    grad_clip: float
-    label_smoothing: float
 
 
 def set_seed(seed: int):
@@ -438,7 +389,7 @@ def build_label_map(df: "pd.DataFrame") -> Tuple[Dict[str, int], Dict[int, str]]
     return label2idx, idx2label
 
 
-def run_eval(model, loader, device, loss_fn):
+def run_eval(model, loader, device):
     """
     Evaluate on validation set.
 
@@ -448,6 +399,7 @@ def run_eval(model, loader, device, loss_fn):
       - compute average loss and average accuracy across batches
     """
     model.eval()
+    loss_fn = nn.CrossEntropyLoss()
     total_loss = 0.0
     total_acc = 0.0
     n_batches = 0
@@ -511,22 +463,15 @@ def main():
     ap.add_argument("--cache_features", action="store_true", help="Cache extracted features in RAM (faster, more RAM)")
     ap.add_argument("--fail_on_missing", action="store_true", help="Raise error if any audio file missing")
     ap.add_argument("--seed", type=int, default=42)
-    ap.add_argument("--disable_bidirectional", action="store_true", help="Use a one-directional LSTM")
-    ap.add_argument("--grad_clip", type=float, default=1.0, help="Gradient clipping norm")
-    ap.add_argument("--label_smoothing", type=float, default=0.05, help="Cross-entropy label smoothing")
 
     args = ap.parse_args()
 
     # Convert target_sr from int argument to either None or actual sr
     target_sr = None if args.target_sr == 0 else int(args.target_sr)
 
-    inferred_input_dim = infer_input_dim(args.n_mfcc)
-    if args.input_dim not in (0, inferred_input_dim):
-        print(f"[WARN] overriding input_dim={args.input_dim} with inferred feature dim {inferred_input_dim}")
-
     # Store all hyperparams in a single object (easy to save)
     hp = HParams(
-        input_dim=inferred_input_dim,
+        input_dim=args.input_dim,
         hidden_dim=args.hidden_dim,
         num_layers=args.num_layers,
         dropout=args.dropout,
@@ -541,9 +486,6 @@ def main():
         target_sr=target_sr,
         num_workers=args.num_workers,
         seed=args.seed,
-        bidirectional=not args.disable_bidirectional,
-        grad_clip=args.grad_clip,
-        label_smoothing=args.label_smoothing,
     )
 
     # --------------------------
@@ -596,12 +538,7 @@ def main():
     # --------------------------
     # (D) Device selection (GPU if available)
     # --------------------------
-    if torch.cuda.is_available():
-        device = torch.device("cuda")
-    elif torch.backends.mps.is_available(): # For Apple Silicon Macs
-        device = torch.device("mps")
-    else:
-        device = torch.device("cpu")
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"[Device] {device}")
     print(f"[Classes] {num_classes}: {list(label2idx.keys())}")
 
@@ -627,7 +564,7 @@ def main():
         shuffle=True,
         num_workers=hp.num_workers,
         collate_fn=collate_train,
-        drop_last=False,
+        drop_last=True  # drop last incomplete batch (keeps batch size consistent)
     )
 
     val_loader = None
@@ -651,7 +588,7 @@ def main():
             shuffle=False,
             num_workers=hp.num_workers,
             collate_fn=collate_train,
-            drop_last=False
+            drop_last=True
         )
 
     # --------------------------
@@ -663,32 +600,22 @@ def main():
         output_dim=num_classes,
         num_layers=hp.num_layers,
         dropout=hp.dropout,
-        bidirectional=hp.bidirectional,
     ).to(device)
 
     # CrossEntropyLoss expects:
     # - logits (B, C) (no softmax needed)
     # - targets (B,) class indices
-    loss_fn = nn.CrossEntropyLoss(label_smoothing=hp.label_smoothing)
+    loss_fn = nn.CrossEntropyLoss()
 
     # Adam optimizer is a strong default for many problems
-    optimizer = torch.optim.AdamW(
+    optimizer = torch.optim.Adam(
         model.parameters(),
         lr=hp.lr,
         weight_decay=hp.weight_decay
     )
 
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer,
-        mode="max" if val_loader is not None else "min",
-        factor=0.5,
-        patience=5,
-        min_lr=1e-5,
-    )
-
     # Track best validation accuracy and save best checkpoint
     best_val_acc = -1.0
-    best_state = None
     best_path = os.path.join(args.out_dir, "checkpoint_best.pt")
 
     # --------------------------
@@ -712,7 +639,6 @@ def main():
 
             # Backpropagation
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=hp.grad_clip)
             optimizer.step()
 
             running_loss += loss.item()
@@ -724,25 +650,30 @@ def main():
         train_acc = running_acc / max(n_batches, 1)
 
         msg = f"Epoch {epoch:03d} | train_loss={train_loss:.4f} | train_acc={train_acc:.2f}"
-        current_score = train_loss
 
         # --------------------------
         # (H) Validation (optional)
         # --------------------------
         do_val = (val_loader is not None) and (epoch % hp.validate_every == 0)
         if do_val:
-            val_loss, val_acc = run_eval(model, val_loader, device, loss_fn)
+            val_loss, val_acc = run_eval(model, val_loader, device)
             msg += f" | val_loss={val_loss:.4f} | val_acc={val_acc:.2f}"
-            current_score = val_acc
 
             # If this epoch achieves better val accuracy, save it as "best"
             if val_acc > best_val_acc:
                 best_val_acc = val_acc
-                best_state = copy.deepcopy(model.state_dict())
+                torch.save(
+                    {
+                        "model_state_dict": model.state_dict(),
+                        "label2idx": label2idx,
+                        "idx2label": idx2label,
+                        "hparams": asdict(hp) | {"num_classes": num_classes},
+                        "best_val_acc": best_val_acc,
+                        "epoch": epoch,
+                    },
+                    best_path,
+                )
                 msg += f"\n[BEST] -> saved {os.path.basename(best_path)}"
-
-        scheduler.step(current_score)
-        msg += f" | lr={optimizer.param_groups[0]['lr']:.6f}"
 
         print(msg)
 
@@ -754,32 +685,7 @@ def main():
         # - you want to compare intermediate models
         if epoch % 10 == 0:
             ckpt_path = os.path.join(args.out_dir, f"checkpoint_epoch{epoch}.pt")
-            torch.save(
-                {
-                    "model_state_dict": model.state_dict(),
-                    "label2idx": label2idx,
-                    "idx2label": idx2label,
-                    "hparams": asdict(hp) | {"num_classes": num_classes},
-                    "epoch": epoch,
-                },
-                ckpt_path,
-            )
-
-    if best_state is None:
-        best_state = copy.deepcopy(model.state_dict())
-        best_val_acc = math.nan
-
-    torch.save(
-        {
-            "model_state_dict": best_state,
-            "label2idx": label2idx,
-            "idx2label": idx2label,
-            "hparams": asdict(hp) | {"num_classes": num_classes},
-            "best_val_acc": best_val_acc,
-            "epoch": hp.epochs,
-        },
-        best_path,
-    )
+            torch.save({"model_state_dict": model.state_dict(), "epoch": epoch}, ckpt_path)
 
     # --------------------------
     # (J) Training summary

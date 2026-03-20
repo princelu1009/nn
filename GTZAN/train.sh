@@ -10,7 +10,7 @@ python train.py \
   --epochs 100 \
   --validate_every 10 \
   --lr 1e-3 \
-  --weight_decay 1e-4 \
+  --weight_decay 1e-4\
   --timeseries_length 128 \
   --hop_length 512 \
   --target_sr 22050

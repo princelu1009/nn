@@ -21,6 +21,7 @@ High-level idea (for students):
 """
 
 import os
+import json
 import argparse
 import pandas as pd
 import numpy as np
@@ -33,10 +34,6 @@ import torch.nn as nn
 # ============================================================
 # 1) Model definition (must match training architecture)
 # ============================================================
-def infer_input_dim(n_mfcc: int) -> int:
-    return (n_mfcc * 3) + 1 + 1 + 12 + 7
-
-
 class LSTMClassifier(nn.Module):
     """
     Same model structure as training:
@@ -48,28 +45,16 @@ class LSTMClassifier(nn.Module):
       must match what was used during training, otherwise shape mismatch occurs
       when loading weights.
     """
-    def __init__(
-        self,
-        input_dim: int,
-        hidden_dim: int,
-        output_dim: int,
-        num_layers: int,
-        dropout: float = 0.0,
-        bidirectional: bool = True,
-    ):
+    def __init__(self, input_dim: int, hidden_dim: int, output_dim: int, num_layers: int, dropout: float = 0.0):
         super().__init__()
-        lstm_out_dim = hidden_dim * (2 if bidirectional else 1)
         # dropout in nn.LSTM only applies when num_layers > 1
         self.lstm = nn.LSTM(
             input_dim,
             hidden_dim,
             num_layers,
-            dropout=(dropout if num_layers > 1 else 0.0),
-            bidirectional=bidirectional,
+            dropout=(dropout if num_layers > 1 else 0.0)
         )
-        self.norm = nn.LayerNorm(lstm_out_dim * 2)
-        self.dropout = nn.Dropout(dropout)
-        self.linear = nn.Linear(lstm_out_dim * 2, output_dim)
+        self.linear = nn.Linear(hidden_dim, output_dim)
 
     def forward(self, x, hidden=None):
         """
@@ -77,11 +62,7 @@ class LSTMClassifier(nn.Module):
         returns logits: (batch, output_dim)
         """
         out, hidden = self.lstm(x, hidden)
-        mean_pool = out.mean(dim=0)
-        max_pool = out.max(dim=0).values
-        pooled = torch.cat([mean_pool, max_pool], dim=1)
-        pooled = self.dropout(self.norm(pooled))
-        logits = self.linear(pooled)
+        logits = self.linear(out[-1])  # last timestep: (batch, hidden_dim) -> (batch, num_classes)
         return logits, hidden
 
 
@@ -103,18 +84,14 @@ def extract_audio_features(file_path: str, timeseries_length=128, hop_length=512
     # If target_sr is not None, librosa will resample audio to target_sr
     y, sr = librosa.load(file_path, sr=target_sr)
 
-    mfcc = librosa.feature.mfcc(y=y, sr=sr, hop_length=hop_length, n_mfcc=n_mfcc)
-    mfcc_delta = librosa.feature.delta(mfcc)
-    mfcc_delta2 = librosa.feature.delta(mfcc, order=2)
-    centroid = librosa.feature.spectral_centroid(y=y, sr=sr, hop_length=hop_length)
-    rms = librosa.feature.rms(y=y, hop_length=hop_length)
-    chroma = librosa.feature.chroma_stft(y=y, sr=sr, hop_length=hop_length)
-    contrast = librosa.feature.spectral_contrast(y=y, sr=sr, hop_length=hop_length)
+    # Extract frame-level features (all share the same time dimension T)
+    mfcc = librosa.feature.mfcc(y=y, sr=sr, hop_length=hop_length, n_mfcc=n_mfcc)              # (13, T)
+    centroid = librosa.feature.spectral_centroid(y=y, sr=sr, hop_length=hop_length)             # (1,  T)
+    chroma = librosa.feature.chroma_stft(y=y, sr=sr, hop_length=hop_length)                     # (12, T)
+    contrast = librosa.feature.spectral_contrast(y=y, sr=sr, hop_length=hop_length)             # (7,  T)
 
-    feats = np.concatenate(
-        [mfcc, mfcc_delta, mfcc_delta2, centroid, rms, chroma, contrast],
-        axis=0,
-    ).astype(np.float32)
+    # Concatenate into (33, T)
+    feats = np.concatenate([mfcc, centroid, chroma, contrast], axis=0).astype(np.float32)
 
     # Pad / truncate time axis to timeseries_length
     T = feats.shape[1]
@@ -123,10 +100,7 @@ def extract_audio_features(file_path: str, timeseries_length=128, hop_length=512
     else:
         feats = feats[:, :timeseries_length]
 
-    feat_mean = feats.mean(axis=1, keepdims=True)
-    feat_std = feats.std(axis=1, keepdims=True)
-    feats = (feats - feat_mean) / np.clip(feat_std, a_min=1e-6, a_max=None)
-
+    # Convert to (128, 33) where each row is a timestep feature vector
     return feats.T
 
 
@@ -162,15 +136,15 @@ def main():
     ap.add_argument("--fail_on_missing", action="store_true")
     args = ap.parse_args()
 
+    # Convert target_sr argument:
+    # - args.target_sr == 0 => None (librosa default behavior)
+    # - else => resample to that sampling rate
+    target_sr = None if args.target_sr == 0 else int(args.target_sr)
+
     # --------------------------
     # (B) Load checkpoint and label mapping
     # --------------------------
-    if torch.cuda.is_available():
-        device = "cuda"
-    elif torch.backends.mps.is_available():
-        device = "mps"
-    else:
-        device = "cpu"
+    device = "cuda" if torch.cuda.is_available() else "cpu"
 
     # map_location ensures checkpoint can be loaded on CPU/GPU safely
     ckpt = torch.load(args.ckpt_path, map_location=device)
@@ -184,39 +158,16 @@ def main():
     else:
         raise ValueError("Checkpoint missing idx2label. Please use checkpoint produced by train_from_csv.py")
 
-    saved_hparams = ckpt.get("hparams", {}) if isinstance(ckpt, dict) else {}
-    n_mfcc = int(saved_hparams.get("n_mfcc", args.n_mfcc))
-    timeseries_length = int(saved_hparams.get("timeseries_length", args.timeseries_length))
-    hop_length = int(saved_hparams.get("hop_length", args.hop_length))
-    hidden_dim = int(saved_hparams.get("hidden_dim", args.hidden_dim))
-    num_layers = int(saved_hparams.get("num_layers", args.num_layers))
-    dropout = float(saved_hparams.get("dropout", args.dropout))
-    bidirectional = bool(saved_hparams.get("bidirectional", True))
-    input_dim = int(saved_hparams.get("input_dim", infer_input_dim(n_mfcc)))
-    saved_target_sr = saved_hparams.get("target_sr", None if args.target_sr == 0 else int(args.target_sr))
-    target_sr = None if saved_target_sr in (0, None) else int(saved_target_sr)
-
     # --------------------------
     # (C) Rebuild model and load weights
     # --------------------------
     model = LSTMClassifier(
-        input_dim=input_dim,
-        hidden_dim=hidden_dim,
+        input_dim=args.input_dim,
+        hidden_dim=args.hidden_dim,
         output_dim=num_classes,
-        num_layers=num_layers,
-        dropout=dropout,
-        bidirectional=bidirectional,
+        num_layers=args.num_layers,
+        dropout=args.dropout,
     ).to(device)
-
-
-    # model=nn.RNN(
-    #         input_dim,
-    #         hidden_dim,
-    #         num_layers,
-    #         dropout=(dropout if num_layers > 1 else 0.0),
-    #         bidirectional=bidirectional,
-    #     )
-    
 
     # Training checkpoint format:
     # - either a dict with key "model_state_dict"
@@ -267,9 +218,9 @@ def main():
         # 1) Extract feature matrix: (128, 33)
         feats = extract_audio_features(
             path,
-            timeseries_length=timeseries_length,
-            hop_length=hop_length,
-            n_mfcc=n_mfcc,
+            timeseries_length=args.timeseries_length,
+            hop_length=args.hop_length,
+            n_mfcc=args.n_mfcc,
             target_sr=target_sr,
         )
 
