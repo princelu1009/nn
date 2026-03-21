@@ -59,7 +59,7 @@ class LSTMClassifier(nn.Module):
         super().__init__()
 
         # nn.LSTM:
-        # input_dim  = feature dimension per timestep (33 by default)
+        # input_dim  = feature dimension per timestep (33 by default)(128,B,33)
         # hidden_dim = hidden size of LSTM state (128 by default)
         # num_layers = stacked LSTM layers (2 by default)
         #
@@ -538,7 +538,13 @@ def main():
     # --------------------------
     # (D) Device selection (GPU if available)
     # --------------------------
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+    elif torch.backends.mps.is_available(): # For Apple Silicon Macs
+        device = torch.device("mps")
+    else:
+        device = torch.device("cpu")
+
     print(f"[Device] {device}")
     print(f"[Classes] {num_classes}: {list(label2idx.keys())}")
 
