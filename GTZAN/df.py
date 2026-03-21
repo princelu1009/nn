@@ -1,17 +1,70 @@
-import pandas as pd
-from typing import Dict, List, Tuple
-import json 
 import os
-import torch
+import json
+import math
+import argparse
+from dataclasses import asdict, dataclass
+from typing import Dict, List, Tuple
+
 import numpy as np
+import pandas as pd
+import librosa
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
-import librosa
 
 
 csv_path="/Users/princelu/Desktop/NN/GTZAN/gtzan.csv"
+
+
+class TransformerGenreClassifier(nn.Module):
+    def __init__(self, input_dim: int, num_heads: int, num_layers: int, output_dim: int, dropout: float = 0.1):
+        super().__init__()
+        
+        # 1. Linear Projection: Map 33 features to a model dimension (e.g., 64 or 128)
+        # Transformers work best when the "d_model" is divisible by num_heads
+        self.d_model = 64 
+        self.input_projection = nn.Linear(input_dim, self.d_model)
+        
+        # 2. Positional Encoding: Tells the model which frame comes first/last
+        self.pos_encoder = nn.Parameter(torch.zeros(1, 128, self.d_model)) 
+        
+        # 3. Transformer Encoder
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=self.d_model, 
+            nhead=num_heads, 
+            dim_feedforward=self.d_model * 4, 
+            dropout=dropout,
+            batch_first=True  # Keeps shape (Batch, Time, Dim)
+        )
+        self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        
+        # 4. Classification Head
+        self.fc = nn.Linear(self.d_model, output_dim)
+
+    def forward(self, x):
+        # x input: (Time, Batch, Feats) from your collate_train -> (128, B, 33)
+        # 1. Switch to (Batch, Time, Feats) for Transformer batch_first=True
+        x = x.permute(1, 0, 2) 
+        
+        # 2. Project features to d_model space
+        x = self.input_projection(x) # (B, 128, 64)
+        
+        # 3. Add Positional Encoding
+        x = x + self.pos_encoder
+        
+        # 4. Pass through Transformer
+        # out shape: (B, 128, 64)
+        out = self.transformer_encoder(x)
+        
+        # 5. Global Average Pooling (or take the first token)
+        # Instead of out[-1], we average across the time dimension for a global summary
+        out = out.mean(dim=1) 
+        
+        logits = self.fc(out)
+        return logits, None
+    
 
 def build_label_map(df: "pd.DataFrame") -> Tuple[Dict[str, int], Dict[int, str]]:
     """
@@ -249,25 +302,132 @@ class AudioCSVDataset(Dataset):
         return audio_id, x, y
 
 
+@dataclass
+class HParams:
+    """
+    A dataclass just to store hyperparameters neatly and save them to JSON.
+    Helpful for reproducibility.
+    """
+    input_dim: int
+    hidden_dim: int
+    num_layers: int
+    dropout: float
+    batch_size: int
+    epochs: int
+    lr: float
+    weight_decay: float
+    validate_every: int
+    timeseries_length: int
+    hop_length: int
+    n_mfcc: int
+    target_sr: int | None
+    num_workers: int
+    seed: int
+
+
+ap = argparse.ArgumentParser()
+
+    # data paths
+ap.add_argument("--csv_path", type=str, required=False, help="CSV with columns: ID,label,set")
+ap.add_argument("--audio_root", type=str, required=False, help="Root folder containing audio files")
+ap.add_argument("--out_dir", type=str, default="checkpoint_csv", help="Output directory for checkpoints & maps")
+
+# model hyperparams (external adjustable)
+ap.add_argument("--input_dim", type=int, default=33)
+ap.add_argument("--hidden_dim", type=int, default=128)
+ap.add_argument("--num_layers", type=int, default=2)
+ap.add_argument("--dropout", type=float, default=0.0)
+ap.add_argument("--batch_size", type=int, default=50)
+ap.add_argument("--epochs", type=int, default=100)
+
+# optimization hyperparams
+ap.add_argument("--lr", type=float, default=1e-3)
+ap.add_argument("--weight_decay", type=float, default=0.0)
+ap.add_argument("--validate_every", type=int, default=1, help="Validate every N epochs")
+
+# feature hyperparams (external adjustable)
+ap.add_argument("--timeseries_length", type=int, default=128)
+ap.add_argument("--hop_length", type=int, default=512)
+ap.add_argument("--n_mfcc", type=int, default=13)
+
+# For target_sr:
+# - If 0: use librosa default behavior (sr=None in our code becomes None => default 22050)
+# - Else: resample audio to this sampling rate
+ap.add_argument("--target_sr", type=int, default=0, help="0 means librosa default; else resample to this SR")
+
+# dataloader settings
+ap.add_argument("--num_workers", type=int, default=0)
+ap.add_argument("--cache_features", action="store_true", help="Cache extracted features in RAM (faster, more RAM)")
+ap.add_argument("--fail_on_missing", action="store_true", help="Raise error if any audio file missing")
+ap.add_argument("--seed", type=int, default=42)
+
+args = ap.parse_args()
+
+# Convert target_sr from int argument to either None or actual sr
+target_sr = None if args.target_sr == 0 else int(args.target_sr)
+
+args = ap.parse_args()
+
+hp = HParams(
+        input_dim=args.input_dim,
+        hidden_dim=args.hidden_dim,
+        num_layers=args.num_layers,
+        dropout=args.dropout,
+        batch_size=args.batch_size,
+        epochs=args.epochs,
+        lr=args.lr,
+        weight_decay=args.weight_decay,
+        validate_every=args.validate_every,
+        timeseries_length=args.timeseries_length,
+        hop_length=args.hop_length,
+        n_mfcc=args.n_mfcc,
+        target_sr=target_sr,
+        num_workers=args.num_workers,
+        seed=args.seed,
+    )
+
 
 train_ds = AudioCSVDataset(
-    train_df,
-    "/Users/princelu/Desktop/NN/GTZAN/genres",
-    label2idx,
-    timeseries_length=128,
-    hop_length=512,
-    n_mfcc=13,
-    target_sr=0,
-    cache_features=args.cache_features,
-    fail_on_missing=args.fail_on_missing
+        train_df,
+        "/Users/princelu/Desktop/NN/GTZAN/genres",
+        label2idx,
+        timeseries_length=hp.timeseries_length,
+        hop_length=hp.hop_length,
+        n_mfcc=hp.n_mfcc,
+        target_sr=hp.target_sr,
+        cache_features=args.cache_features,
+        fail_on_missing=args.fail_on_missing
+    )
+# shuffle=True for training (important!)
+# train_loader = DataLoader(
+#     train_ds,
+#     batch_size=hp.batch_size,
+#     shuffle=True,
+#     num_workers=hp.num_workers,
+#     collate_fn=collate_train,
+#     drop_last=True  # drop last incomplete batch (keeps batch size consistent)
+# )
+
+
+one_sample = train_ds[1]
+audio_id, x, y = one_sample
+
+print("audio_id:", audio_id)
+print("x shape:", x.shape)
+print("y:", y)
+
+x_batch = x.unsqueeze(1)
+
+model = TransformerGenreClassifier(
+    input_dim=33,
+    num_heads=4,
+    num_layers=2,
+    output_dim=num_classes,
 )
 
-# shuffle=True for training (important!)
-train_loader = DataLoader(
-    train_ds,
-    batch_size=hp.batch_size,
-    shuffle=True,
-    num_workers=hp.num_workers,
-    collate_fn=collate_train,
-    drop_last=True  # drop last incomplete batch (keeps batch size consistent)
-)
+logits, _ = model(x_batch)
+
+print("batched input shape:", x_batch.shape)
+print("logits shape:", logits.shape)
+print("logits:", logits)
+print("pred class idx:", logits.argmax(dim=1))

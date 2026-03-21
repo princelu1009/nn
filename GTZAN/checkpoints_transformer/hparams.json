@@ -1,0 +1,17 @@
+{
+  "input_dim": 33,
+  "num_layers": 2,
+  "dropout": 0.1,
+  "batch_size": 64,
+  "epochs": 100,
+  "lr": 0.001,
+  "weight_decay": 0.0001,
+  "validate_every": 10,
+  "timeseries_length": 128,
+  "hop_length": 512,
+  "n_mfcc": 13,
+  "target_sr": 22050,
+  "num_workers": 0,
+  "seed": 42,
+  "num_classes": 10
+}
