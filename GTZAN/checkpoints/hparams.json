@@ -1,5 +1,5 @@
 {
-  "input_dim": 60,
+  "input_dim": 33,
   "hidden_dim": 256,
   "num_layers": 2,
   "dropout": 0.1,
@@ -14,8 +14,5 @@
   "target_sr": 22050,
   "num_workers": 0,
   "seed": 42,
-  "bidirectional": true,
-  "grad_clip": 1.0,
-  "label_smoothing": 0.05,
   "num_classes": 10
 }
