@@ -3,9 +3,9 @@ python predict.py \
   --audio_root /Users/princelu/Desktop/NN/GTZAN/genres \
   --ckpt_path /Users/princelu/Desktop/NN/GTZAN/checkpoints/checkpoint_best.pt \
   --out_csv /Users/princelu/Desktop/NN/GTZAN/61447070S_submission.csv \
-  --hidden_dim 256 \
   --num_layers 2 \
-  --dropout 0.1 \
-  --timeseries_length 128 \
-  --hop_length 512 \
+  --dropout 0.3 \
+  --timeseries_length 256 \
+  --hop_length 256 \
+  --n_mels 33 \
   --target_sr 22050
