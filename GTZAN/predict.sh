@@ -1,7 +1,7 @@
 python predict.py \
   --csv_path /Users/princelu/Desktop/NN/GTZAN/gtzan.csv \
   --audio_root /Users/princelu/Desktop/NN/GTZAN/genres \
-  --ckpt_path /Users/princelu/Desktop/NN/GTZAN/checkpoints/checkpoint_best.pt \
+  --ckpt_path /Users/princelu/Desktop/NN/GTZAN/checkpoints_transformer_trans/checkpoint_best.pt \
   --out_csv /Users/princelu/Desktop/NN/GTZAN/61447070S_submission.csv \
   --num_layers 2 \
   --dropout 0.3 \

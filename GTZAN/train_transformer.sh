@@ -1,17 +1,17 @@
 python /Users/princelu/Desktop/NN/GTZAN/train_tansformer.py \
   --csv_path /Users/princelu/Desktop/NN/GTZAN/gtzan.csv \
   --audio_root /Users/princelu/Desktop/NN/GTZAN/genres \
-  --out_dir /Users/princelu/Desktop/NN/GTZAN/checkpoints_transformer_logmel \
+  --out_dir /Users/princelu/Desktop/NN/GTZAN/checkpoints_transformer_trans \
   --d_model 128 \
   --num_heads 8 \
   --num_layers 2 \
   --dropout 0.4 \
-  --batch_size 64 \
+  --batch_size 32 \
   --epochs 100 \
   --validate_every 5 \
   --lr 1e-3 \
   --weight_decay 1e-4 \
-  --timeseries_length 256 \
+  --timeseries_length 512 \
   --hop_length 256 \
   --n_mels 33 \
   --target_sr 22050

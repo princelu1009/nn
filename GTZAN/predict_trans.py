@@ -29,6 +29,7 @@ import librosa
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 # ============================================================
@@ -80,6 +81,17 @@ class TransformerGenreClassifier(nn.Module):
             nn.Linear(self.d_model, output_dim)
         )
 
+    def _get_pos_embed(self, seq_len: int) -> torch.Tensor:
+        """
+        Resize the learnable positional embedding if the active sequence length changes.
+        """
+        if self.pos_embed.shape[1] == seq_len:
+            return self.pos_embed
+
+        pos_embed = self.pos_embed.transpose(1, 2)
+        pos_embed = F.interpolate(pos_embed, size=seq_len, mode="linear", align_corners=False)
+        return pos_embed.transpose(1, 2)
+
     def forward(self, x):
         # x: (Time, Batch, Mel, Channel) -> flatten mel/channel into Conv1d channels
         x = x.permute(1, 2, 3, 0).reshape(x.shape[1], -1, x.shape[0])
@@ -99,7 +111,7 @@ class TransformerGenreClassifier(nn.Module):
         x = torch.cat((cls_tokens, x), dim=1) # (B, 129, 128)
         
         # Add Positional Embedding
-        x = x + self.pos_embed
+        x = x + self._get_pos_embed(x.shape[1])
         
         # Transformer
         x = self.transformer_encoder(x)
@@ -171,6 +183,30 @@ def extract_audio_features(file_path: str, timeseries_length=256, hop_length=256
     return feats.transpose(2, 1, 0)
 
 
+def resize_checkpoint_pos_embed(state_dict, target_seq_len):
+    """
+    Resize checkpoint positional embeddings when sequence length changes.
+    """
+    pos_key = "pos_embed"
+    if pos_key not in state_dict:
+        return state_dict
+
+    pos_embed = state_dict[pos_key]
+    if pos_embed.ndim != 3 or pos_embed.shape[1] == target_seq_len:
+        return state_dict
+
+    resized = F.interpolate(
+        pos_embed.transpose(1, 2),
+        size=target_seq_len,
+        mode="linear",
+        align_corners=False,
+    ).transpose(1, 2)
+
+    updated_state_dict = dict(state_dict)
+    updated_state_dict[pos_key] = resized
+    return updated_state_dict
+
+
 # ============================================================
 # 3) Main inference flow
 # ============================================================
@@ -186,19 +222,19 @@ def main():
 
     # Feature parameters:
     # MUST match training configuration, otherwise model sees different input distribution/shape.
-    ap.add_argument("--timeseries_length", type=int, default=128)
-    ap.add_argument("--hop_length", type=int, default=512)
+    ap.add_argument("--timeseries_length", type=int, default=512)
+    ap.add_argument("--hop_length", type=int, default=256)
     ap.add_argument("--n_mels", type=int, default=33)
     ap.add_argument("--target_sr", type=int, default=0)  # 0 means librosa default (we convert to None)
 
     # Model parameters:
     # MUST match training architecture, otherwise model weights cannot be loaded correctly.
     ap.add_argument("--input_dim", type=int, default=99)
-    ap.add_argument("--d_model", type=int, default=64)
+    ap.add_argument("--d_model", type=int, default=128)
     ap.add_argument("--num_heads", type=int, default=8)
     # ap.add_argument("--hidden_dim", type=int, default=128)
     ap.add_argument("--num_layers", type=int, default=2)
-    ap.add_argument("--dropout", type=float, default=0.0)
+    ap.add_argument("--dropout", type=float, default=0.4)
 
     # If True, missing audio files will raise an error and stop inference.
     # If False, we will provide a fallback prediction.
@@ -261,6 +297,7 @@ def main():
     # - either a dict with key "model_state_dict"
     # - or directly a state_dict
     state_dict = ckpt["model_state_dict"] if (isinstance(ckpt, dict) and "model_state_dict" in ckpt) else ckpt
+    state_dict = resize_checkpoint_pos_embed(state_dict, timeseries_length + 1)
     model.load_state_dict(state_dict)
 
     # model.eval() disables dropout and sets layers to inference mode

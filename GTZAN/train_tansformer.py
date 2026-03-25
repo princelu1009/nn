@@ -189,8 +189,6 @@ def extract_audio_features(
         feats = feats[:, :, :timeseries_length]
 
     return feats.transpose(2, 1, 0)
-
-
 # ============================================================
 # 3) Dataset: reading CSV rows and loading audio
 # ============================================================
@@ -530,6 +528,12 @@ def main():
         seed=args.seed,
     )
 
+    if hp.timeseries_length >= 512 and hp.batch_size > 32:
+        print(
+            f"[WARN] timeseries_length={hp.timeseries_length} with batch_size={hp.batch_size} "
+            "may use a lot of memory. Consider batch_size=32 or smaller."
+        )
+
     # --------------------------
     # (B) Setup output folder + seed
     # --------------------------
@@ -704,7 +708,6 @@ def main():
             # Backpropagation
             loss.backward()
             optimizer.step()
-            scheduler.step()
 
             running_loss += loss.item()
             running_acc += TransformerGenreClassifier.accuracy(logits, y)
@@ -713,7 +716,6 @@ def main():
         # Average metrics over batches
         train_loss = running_loss / max(n_batches, 1)
         train_acc = running_acc / max(n_batches, 1)
-
         msg = f"Epoch {epoch:03d} | train_loss={train_loss:.4f} | train_acc={train_acc:.2f}"
 
         # --------------------------
@@ -740,6 +742,7 @@ def main():
                 )
                 msg += f"\n[BEST] -> saved {os.path.basename(best_path)}"
 
+        scheduler.step()
         print(msg)
 
         # --------------------------
